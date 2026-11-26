@@ -1,0 +1,25 @@
+version: '3.8'
+
+services:
+  cross-engine-web:
+    build: .
+    container_name: cross-engine-web
+    restart: unless-stopped
+    ports:
+      - "3333:3333"
+    environment:
+      - NODE_ENV=production
+      - PORT=3333
+      - ALLOWED_DEV_ORIGINS=192.168.200.102,crossengine.riograndia.xyz
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3333/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    networks:
+      - cross-engine-net
+
+networks:
+  cross-engine-net:
+    driver: bridge
