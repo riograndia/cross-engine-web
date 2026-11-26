@@ -74,6 +74,10 @@ fi
 echo ""
 echo ">>> Phase 3: ตั้งค่า systemd service สำหรับ cross-engine-web"
 
+# ค้นหา path ของ npm ให้ถูกต้อง (รองรับทั้ง /usr/bin/npm และ ~/.local/bin/npm)
+NPM_PATH=$(command -v npm 2>/dev/null || echo "/usr/bin/npm")
+NODE_PATH=$(command -v node 2>/dev/null || echo "/usr/bin/node")
+
 cat > "$SVC_DIR/cross-engine-web.service" <<EOF
 [Unit]
 Description=Cross-Engine Web (Next.js Dev Server)
@@ -84,7 +88,8 @@ After=network-online.target
 Type=simple
 User=${APP_USER}
 WorkingDirectory=/home/${APP_USER}/cross-engine-web
-ExecStart=/usr/bin/npm run dev
+Environment=PATH=$(dirname "$NPM_PATH"):/usr/local/bin:/usr/bin:/bin
+ExecStart=${NPM_PATH} run dev
 Restart=always
 RestartSec=5
 Environment=NODE_ENV=development
