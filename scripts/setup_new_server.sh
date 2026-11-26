@@ -25,6 +25,13 @@ CF_BIN=${CF_BIN:-/usr/local/bin/cloudflared}
 read -p "ติดตั้ง Node.js + npm ให้อัตโนมัติไหม? (y/n, default y): " INSTALL_NODE
 INSTALL_NODE=${INSTALL_NODE:-y}
 
+echo ""
+echo ">>> เลือกโหมดติดตั้งแอป"
+echo "  1) systemd service (รันบน host โดยตรง)"
+echo "  2) Docker container (รันใน container)"
+read -p "เลือกหมายเลข (default 1): " DEPLOY_MODE
+DEPLOY_MODE=${DEPLOY_MODE:-1}
+
 CONFIG_DIR="/etc/cloudflared"
 SVC_DIR="/etc/systemd/system"
 
@@ -37,7 +44,24 @@ if ! command -v git &>/dev/null; then
     sudo apt-get update -y && sudo apt-get install -y git curl wget ca-certificates gnupg
 fi
 
-if [ "$INSTALL_NODE" = "y" ] && ! command -v node &>/dev/null; then
+# ตรวจสอบ Docker (ถ้าเลือกโหมด Docker)
+if [ "$DEPLOY_MODE" = "2" ]; then
+    if ! command -v docker &>/dev/null; then
+        echo "ติดตั้ง Docker..."
+        sudo apt-get update -y
+        sudo apt-get install -y docker.io docker-compose-plugin ca-certificates curl gnupg
+        sudo usermod -aG docker "$APP_USER" || true
+        echo "⚠️  หลังจากติดตั้ง Docker ให้ล็อกเอาท์แล้วล็อกอินใหม่ เพื่อให้กลุ่ม docker ทำงาน"
+    else
+        echo "✅ Docker มีอยู่แล้ว ข้ามการติดตั้ง"
+    fi
+    if ! docker compose version &>/dev/null; then
+        echo "ติดตั้ง Docker Compose plugin..."
+        sudo apt-get install -y docker-compose-plugin
+    fi
+fi
+
+if [ "$INSTALL_NODE" = "y" ] && [ "$DEPLOY_MODE" = "1" ] && ! command -v node &>/dev/null; then
     echo "ติดตั้ง Node.js LTS..."
     curl -fsSL https://deb.nodesource.com/setup_lts.x | sudo -E bash -
     sudo apt-get install -y nodejs
@@ -63,22 +87,29 @@ fi
 
 cd "$WORK_DIR/cross-engine-web"
 
-if [ ! -d node_modules ]; then
-    echo "รัน npm install..."
-    npm install
+if [ "$DEPLOY_MODE" = "1" ]; then
+    if [ ! -d node_modules ]; then
+        echo "รัน npm install..."
+        npm install
+    else
+        echo "node_modules มีอยู่แล้ว ข้ามการ install"
+    fi
 else
-    echo "node_modules มีอยู่แล้ว ข้ามการ install"
+    echo "โหมด Docker: ข้ามการ npm install บน host (build ใน container แทน)"
 fi
 
-# ---------- Phase 3: สร้าง systemd service สำหรับ Next.js ----------
+# ---------- Phase 3: ติดตั้งแอปตามโหมดที่เลือก ----------
 echo ""
-echo ">>> Phase 3: ตั้งค่า systemd service สำหรับ cross-engine-web"
+echo ">>> Phase 3: ติดตั้งแอป cross-engine-web"
 
-# ค้นหา path ของ npm ให้ถูกต้อง (รองรับทั้ง /usr/bin/npm และ ~/.local/bin/npm)
-NPM_PATH=$(command -v npm 2>/dev/null || echo "/usr/bin/npm")
-NODE_PATH=$(command -v node 2>/dev/null || echo "/usr/bin/node")
+if [ "$DEPLOY_MODE" = "1" ]; then
+    # โหมด systemd service
+    echo ">>> ตั้งค่า systemd service สำหรับ cross-engine-web"
 
-cat > "$SVC_DIR/cross-engine-web.service" <<EOF
+    # ค้นหา path ของ npm ให้ถูกต้อง
+    NPM_PATH=$(command -v npm 2>/dev/null || echo "/usr/bin/npm")
+
+    cat > "$SVC_DIR/cross-engine-web.service" <<EOF
 [Unit]
 Description=Cross-Engine Web (Next.js Dev Server)
 Wants=network-online.target
@@ -99,17 +130,49 @@ Environment=PORT=3333
 WantedBy=multi-user.target
 EOF
 
-systemctl daemon-reload
-systemctl enable --now cross-engine-web.service
+    systemctl daemon-reload
+    systemctl enable --now cross-engine-web.service
 
-echo "รอให้ Next.js เริ่มทำงาน (10 วินาที)..."
-sleep 10
+    echo "รอให้ Next.js เริ่มทำงาน (10 วินาที)..."
+    sleep 10
 
-# ตรวจสอบ port 3333
-if ss -tlnp | grep -q ":3333"; then
-    echo "✅ Port 3333 เปิดใช้งานแล้ว"
+    # ตรวจสอบ port 3333
+    if ss -tlnp | grep -q ":3333"; then
+        echo "✅ Port 3333 เปิดใช้งานแล้ว (systemd)"
+    else
+        echo "⚠️  Port 3333 ยังไม่เปิด ลองตรวจสอบ log: journalctl -u cross-engine-web.service -f"
+    fi
 else
-    echo "⚠️  Port 3333 ยังไม่เปิด ลองตรวจสอบ log: journalctl -u cross-engine-web.service -f"
+    # โหมด Docker
+    echo ">>> รัน cross-engine-web ด้วย Docker Compose"
+
+    # ตรวจสอบว่ามี systemd service เก่าที่ใช้ port 3333 หรือไม่
+    if systemctl is-active --quiet cross-engine-web.service 2>/dev/null; then
+        echo "⚠️  พบ cross-engine-web.service รันอยู่ (ระบบ systemd)"
+        echo "   กำลังหยุด service เก่าเพื่อหลีกเลี่ยงการชนกับ Docker container..."
+        systemctl stop cross-engine-web.service || true
+        systemctl disable cross-engine-web.service || true
+        echo "   หยุด service เก่าเรียบร้อยแล้ว"
+    fi
+
+    docker compose up -d --build
+
+    echo "รอให้ container เริ่มทำงาน (15 วินาที)..."
+    sleep 15
+
+    # ตรวจสอบ container
+    if docker ps --filter "name=cross-engine-web" --format "{{.Names}}" | grep -q "cross-engine-web"; then
+        echo "✅ Container cross-engine-web รันอยู่แล้ว"
+    else
+        echo "⚠️  Container cross-engine-web อาจยังไม่พร้อม ลองตรวจสอบ: docker compose logs -f"
+    fi
+
+    # ตรวจสอบ port 3333
+    if ss -tlnp | grep -q ":3333"; then
+        echo "✅ Port 3333 เปิดใช้งานแล้ว (Docker)"
+    else
+        echo "⚠️  Port 3333 ยังไม่เปิด ลองตรวจสอบ: docker compose logs -f cross-engine-web"
+    fi
 fi
 
 # ---------- Phase 4: ตั้งค่า Cloudflare Tunnel services ----------
